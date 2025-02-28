@@ -9,6 +9,7 @@ import requests
 import random
 import threading
 import time
+import pyperclip  
 from bs4 import BeautifulSoup
 
 
@@ -26,11 +27,21 @@ RED = (255, 50, 50)
 GREEN = (50, 255, 100)
 WHITE = (255, 255, 255)
 GRAY = (100, 100, 100)
+YELLOW = (255, 255, 0)  
 
 title_font = pygame.font.SysFont("Arial", 48, bold=True)
 header_font = pygame.font.SysFont("Arial", 36)
 text_font = pygame.font.SysFont("Arial", 20)
 result_font = pygame.font.SysFont("Arial", 24, bold=True)
+
+
+url_history = []
+current_history_index = -1
+
+
+undo_history = []
+undo_position = -1
+max_undo_steps = 20
 
 engine = None
 def init_tts():
@@ -66,7 +77,9 @@ scan_details = []
 url_input = ""
 input_active = True
 cursor_visible = True
+cursor_position = 0 
 cursor_time = 0
+url_status = ""  
 
 for i in range(particle_count):
     angle = random.uniform(0, 360)
@@ -92,6 +105,40 @@ def speak_text(text):
     speech_thread = threading.Thread(target=speak_worker)
     speech_thread.daemon = True
     speech_thread.start()
+
+def is_valid_url(url):
+    """Check if the URL is valid in terms of format and existence"""
+    try:
+        result = urllib.parse.urlparse(url)
+        
+        if not all([result.scheme, result.netloc]):
+            return False
+        
+        if '.' not in result.netloc:
+            return False
+            
+        return True
+    except:
+        return False
+
+
+def is_temporary_domain(url):
+    """Check if the URL is from a temporary domain"""
+    try:
+        parsed_url = urllib.parse.urlparse(url)
+        temp_domains = ["temp.com", "temporary.com", "tempurl.com", "10minutemail.com", 
+                         "guerrillamail.com", "sharklasers.com", "disposable.com",
+                         "mailinator.com", "yopmail.com", "tempmail.net"]
+        
+        domain = parsed_url.netloc.lower()
+        
+        for temp in temp_domains:
+            if domain.endswith(temp) or domain == temp:
+                return True
+                
+        return False
+    except:
+        return False
 
 def check_url(url):
     results = []
@@ -157,14 +204,23 @@ def extract_title(url):
         return f"Error parsing HTML: {str(e)}"
 
 def scan_url(url):
-    global scan_result, scan_details, scanning
+    global scan_result, scan_details, scanning, url_status
     
     scan_details = []
     is_suspicious = False
+    
+    if not is_valid_url(url):
+        scan_result = "INVALID"
+        scan_details.append("Invalid URL format. Please enter a complete URL including http:// or https://")
+        speak_text("Invalid URL format. Please enter a complete URL including protocol.")
+        scanning = False
+        return
   
-    if "://" not in url:
-        url = "https://" + url
-        scan_details.append(f"Added https:// prefix to URL: {url}")
+    
+    if is_temporary_domain(url):
+        url_status = "TEMPORARY DOMAIN"
+        scan_details.append("WARNING: This appears to be a temporary domain.")
+        is_suspicious = True
     
     suspicious, results = check_url(url)
     if suspicious:
@@ -184,15 +240,15 @@ def scan_url(url):
     
     if is_suspicious:
         scan_result = "SUSPICIOUS"
-        scan_details.append("\nThis URL is potentially suspicious. Exercise caution!")
+        scan_details.append("This URL is potentially suspicious. Exercise caution!")
     else:
         scan_result = "SAFE"
-        scan_details.append("\nThis URL appears to be safe based on our checks.")
+        scan_details.append("This URL appears to be safe based on our checks.")
     
     speak_text(f"Scan complete. The URL is {scan_result}.")
     
     scanning = False
-
+    
 def draw_core():
   
     global core_pulse, core_pulse_direction
@@ -215,6 +271,8 @@ def draw_core():
             color = (RED[0], RED[1], RED[2], alpha)
         elif scan_result == "SAFE":
             color = (GREEN[0], GREEN[1], GREEN[2], alpha)
+        elif scan_result == "INVALID":
+            color = (YELLOW[0], YELLOW[1], YELLOW[2], alpha)
         else:
             color = (BLUE[0], BLUE[1], BLUE[2], alpha)
             
@@ -242,6 +300,8 @@ def draw_core():
             color = RED
         elif scan_result == "SAFE":
             color = GREEN
+        elif scan_result == "INVALID":
+            color = YELLOW
         else:
             color = BLUE
         pygame.draw.circle(screen, color, (int(core_x), int(core_y)), int(pulse_radius))
@@ -293,6 +353,8 @@ def draw_particles():
             color = RED
         elif scan_result == "SAFE":
             color = GREEN
+        elif scan_result == "INVALID":
+            color = YELLOW
         else:
             color = BLUE
         
@@ -312,15 +374,16 @@ def draw_ui():
     label = text_font.render("Enter URL to scan:", True, WHITE)
     screen.blit(label, (input_box.x, input_box.y - 30))
     
-    input_surface = text_font.render(url_input, True, WHITE)
+    if url_status:
+        status_surface = text_font.render(url_status, True, YELLOW)
+        screen.blit(status_surface, (input_box.x + input_box.width + 10, input_box.y + 15))
     
-    text_width = input_surface.get_width()
-    if input_active and cursor_visible:
-        display_text = url_input + "|"
+    if input_active:
+        visible_input = url_input[:cursor_position] + ("|" if cursor_visible else " ") + url_input[cursor_position:]
     else:
-        display_text = url_input
+        visible_input = url_input
     
-    input_surface = text_font.render(display_text, True, WHITE)
+    input_surface = text_font.render(visible_input, True, WHITE)
     screen.blit(input_surface, (input_box.x + 5, input_box.y + 15))
     
     button_width = 150
@@ -344,8 +407,12 @@ def draw_ui():
         
         if scan_result == "SUSPICIOUS":
             result_text = result_font.render("RESULT: SUSPICIOUS", True, RED)
-        else:
+        elif scan_result == "SAFE":
             result_text = result_font.render("RESULT: SAFE", True, GREEN)
+        elif scan_result == "INVALID":
+            result_text = result_font.render("RESULT: INVALID URL", True, YELLOW)
+        else:
+            result_text = result_font.render(f"RESULT: {scan_result}", True, BLUE)
         
         screen.blit(result_text, (WIDTH // 2 - result_text.get_width() // 2, result_y))
         
@@ -360,6 +427,63 @@ def draw_ui():
             more_text = text_font.render(f"... and {len(scan_details) - max_details} more details", True, GRAY)
             screen.blit(more_text, (WIDTH // 4, details_y + max_details * 25))
 
+def save_for_undo():
+    global undo_history, undo_position
+    
+    if undo_position == len(undo_history) - 1:
+        undo_history.append((url_input, cursor_position))
+        undo_position += 1
+        if len(undo_history) > max_undo_steps:
+            undo_history.pop(0)
+            undo_position -= 1
+    else:
+        undo_history = undo_history[:undo_position + 1]
+        undo_history.append((url_input, cursor_position))
+        undo_position = len(undo_history) - 1
+
+def undo():
+    global url_input, cursor_position, undo_position
+    
+    if undo_position > 0:
+        undo_position -= 1
+        url_input, cursor_position = undo_history[undo_position]
+
+def redo():
+    global url_input, cursor_position, undo_position
+    
+    if undo_position < len(undo_history) - 1:
+        undo_position += 1
+        url_input, cursor_position = undo_history[undo_position]
+
+def start_scan():
+    global scanning, scan_progress, scan_result, url_history, current_history_index
+    
+    if url_input.strip() and not scanning:
+        scanning = True
+        scan_progress = 0
+        scan_result = None
+        
+        if current_history_index < len(url_history) - 1:
+            url_history = url_history[:current_history_index + 1]
+        
+        url_history.append(url_input)
+        current_history_index = len(url_history) - 1
+        
+        scan_thread = threading.Thread(target=scan_url, args=(url_input,))
+        scan_thread.daemon = True
+        scan_thread.start()
+        
+        speak_text(f"Scanning {url_input}")
+
+def navigate_history(direction):
+    global current_history_index, url_input
+    
+    if direction == "back" and current_history_index > 0:
+        current_history_index -= 1
+        url_input = url_history[current_history_index]
+    elif direction == "forward" and current_history_index < len(url_history) - 1:
+        current_history_index += 1
+        url_input = url_history[current_history_index]
 
 running = True
 clock = pygame.time.Clock()
@@ -372,8 +496,11 @@ def check_button_click(pos):
     button_rect = pygame.Rect(button_x, button_y, button_width, button_height)
     
     if button_rect.collidepoint(pos) and not scanning:
-        return True
-    return False
+        return "scan"
+    
+    return None
+undo_history.append((url_input, cursor_position))
+undo_position = 0
 
 while running:
     current_time = time.time()
@@ -384,71 +511,88 @@ while running:
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if input_box.collidepoint(event.pos):
                 input_active = True
+                click_x = event.pos[0] - input_box.x - 5
+                test_widths = [text_font.size(url_input[:i])[0] for i in range(len(url_input) + 1)]
+                closest_pos = min(range(len(test_widths)), key=lambda i: abs(test_widths[i] - click_x))
+                cursor_position = closest_pos
             else:
                 input_active = False
             
-            if check_button_click(event.pos) and url_input.strip() and not scanning:
-                
-                scanning = True
-                scan_progress = 0
-                scan_result = None
-                
-               
-                scan_thread = threading.Thread(target=scan_url, args=(url_input,))
-                scan_thread.daemon = True
-                scan_thread.start()
-                
-                
-                speak_text(f"Scanning {url_input}")
+            button_action = check_button_click(event.pos)
+            if button_action == "scan":
+                start_scan()
         
         elif event.type == pygame.KEYDOWN:
             if input_active:
+                old_input = url_input
+                old_cursor = cursor_position
+                
                 if event.key == pygame.K_RETURN:
-                    if url_input.strip() and not scanning:
-                       
-                        scanning = True
-                        scan_progress = 0
-                        scan_result = None
-                        
-                        scan_thread = threading.Thread(target=scan_url, args=(url_input,))
-                        scan_thread.daemon = True
-                        scan_thread.start()
-                        
-                        
-                        speak_text(f"Scanning {url_input}")
+                    start_scan()
                 elif event.key == pygame.K_BACKSPACE:
-                    url_input = url_input[:-1]
+                    if cursor_position > 0:
+                        url_input = url_input[:cursor_position-1] + url_input[cursor_position:]
+                        cursor_position -= 1
+                        save_for_undo()
+                elif event.key == pygame.K_DELETE:
+                    if cursor_position < len(url_input):
+                        url_input = url_input[:cursor_position] + url_input[cursor_position+1:]
+                        save_for_undo()
+                elif event.key == pygame.K_LEFT:
+                    if event.mod & pygame.KMOD_ALT:
+                        navigate_history("back")
+                    else:
+                        cursor_position = max(0, cursor_position - 1)
+                elif event.key == pygame.K_RIGHT:
+                    if event.mod & pygame.KMOD_ALT:
+                        navigate_history("forward")
+                    else:
+                        cursor_position = min(len(url_input), cursor_position + 1)
+                elif event.key == pygame.K_HOME:
+                    cursor_position = 0
+                elif event.key == pygame.K_END:
+                    cursor_position = len(url_input)
+                elif event.key == pygame.K_a and event.mod & pygame.KMOD_CTRL:
+                    cursor_position = len(url_input)
+                elif event.key == pygame.K_z and event.mod & pygame.KMOD_CTRL:
+                    if not (event.mod & pygame.KMOD_SHIFT):
+                        undo()
+                    else:
+                        redo()
+                elif event.key == pygame.K_y and event.mod & pygame.KMOD_CTRL:
+                    redo()
+                elif event.key == pygame.K_v and event.mod & pygame.KMOD_CTRL:
+                    try:
+                        clipboard_text = pyperclip.paste()
+                        url_input = url_input[:cursor_position] + clipboard_text + url_input[cursor_position:]
+                        cursor_position += len(clipboard_text)
+                        save_for_undo()
+                    except:
+                        print("Clipboard access error")
+                elif event.key == pygame.K_c and event.mod & pygame.KMOD_CTRL:
+                    try:
+                        pyperclip.copy(url_input)
+                    except:
+                        print("Clipboard access error")
                 else:
-                    url_input += event.unicode
-    
-    
+                    url_input = url_input[:cursor_position] + event.unicode + url_input[cursor_position:]
+                    cursor_position += len(event.unicode)
+                    save_for_undo()
     if current_time - cursor_time > 0.5:
         cursor_visible = not cursor_visible
         cursor_time = current_time
-    
-   
     if scanning:
         scan_progress += 0.01
         if scan_progress >= 1:
             scan_progress = 0
-    
-   
     screen.fill(BLACK)
-    
-    
     for x in range(0, WIDTH, 20):
         pygame.draw.line(screen, (20, 20, 30), (x, 0), (x, HEIGHT), 1)
     for y in range(0, HEIGHT, 20):
         pygame.draw.line(screen, (20, 20, 30), (0, y), (WIDTH, y), 1)
-    
-   
     draw_ui()
-    
-    
     update_particles()
     draw_particles()
-    
-    
     draw_core()
     
     pygame.display.flip()
